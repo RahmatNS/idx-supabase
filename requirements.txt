@@ -2,3 +2,4 @@ streamlit>=1.38.0
 pandas>=2.2.0
 pillow>=10.4.0
 supabase
+yfinance>=0.2.40
