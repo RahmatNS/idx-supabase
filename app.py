@@ -32,6 +32,31 @@ df = load_data()
 
 # Tampilan Utama Dashboard
 if not df.empty:
+    st.subheader("Daftar Semua Saham")
+    latest_by_ticker = (
+        df.sort_values(["ticker", "date"], ascending=[True, False])
+        .drop_duplicates(subset="ticker")
+        .sort_values("ticker")
+    )
+    page_size = st.selectbox("Jumlah saham per halaman", [25, 50, 100], index=0)
+    page_count = max(1, (len(latest_by_ticker) + page_size - 1) // page_size)
+    page_number = st.number_input(
+        "Halaman",
+        min_value=1,
+        max_value=page_count,
+        value=1,
+        step=1,
+    )
+    start = (page_number - 1) * page_size
+    page_df = latest_by_ticker.iloc[start:start + page_size]
+    st.caption(f"Menampilkan {start + 1}-{start + len(page_df)} dari {len(latest_by_ticker)} saham")
+    st.dataframe(
+        page_df[["ticker", "date", "open", "high", "low", "close", "volume"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("---")
     # Dropdown Filter Ticker
     tickers = df['ticker'].unique()
     selected_ticker = st.selectbox("Pilih Saham / Indeks:", tickers)
