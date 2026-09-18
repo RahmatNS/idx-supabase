@@ -1,0 +1,20 @@
+name: Daily IHSG Scraper
+
+on:
+  schedule:
+    - cron: '0 10 * * 1-5' # Berjalan otomatis tiap Senin-Jumat jam 17:00 WIB (10:00 UTC)
+  workflow_dispatch: # Agar tombol 'Run' manual aktif
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python fetch_data.py
