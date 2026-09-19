@@ -170,6 +170,11 @@ if not df.empty:
                 row=2, col=1
             )
 
+            # Cari hari-hari libur bursa yang tidak ada data perdagangannya di chart_df
+            all_days = pd.date_range(start=chart_df['date'].min(), end=chart_df['date'].max(), freq='D')
+            trading_days = set(chart_df['date'].dt.strftime('%Y-%m-%d'))
+            holidays = [d.strftime('%Y-%m-%d') for d in all_days if d.strftime('%Y-%m-%d') not in trading_days and d.weekday() < 5]
+
             fig.update_layout(
                 xaxis_rangeslider_visible=False,
                 height=550,
@@ -177,6 +182,13 @@ if not df.empty:
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 template="plotly_white"
             )
+
+            # Sembunyikan akhir pekan (Sabtu & Minggu) dan hari libur non-trading
+            rangebreak_rules = [dict(bounds=["sat", "mon"])] # hide weekend
+            if holidays:
+                rangebreak_rules.append(dict(values=holidays)) # hide public holidays
+
+            fig.update_xaxes(rangebreaks=rangebreak_rules)
             st.plotly_chart(fig, use_container_width=True)
         except ImportError:
             # Fallback jika plotly belum terinstall
