@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 from supabase import create_client
 
 # Konfigurasi Halaman Dashboard
@@ -15,11 +16,11 @@ except Exception as e:
     st.error(f"Gagal koneksi ke Supabase. Pastikan Secrets sudah disetel di Streamlit Cloud. Detail: {e}")
     st.stop()
 
-# Fungsi untuk mengambil data ringkasan terbaru dari Supabase
+# Fungsi untuk mengambil data dari Supabase
 @st.cache_data(ttl=3600)
 def load_data():
     try:
-        response = supabase.table("ihsg_daily").select("*").order("date", desc=True).limit(2000).execute()
+        response = supabase.table("ihsg_daily").select("*").order("date", desc=True).execute()
         df = pd.DataFrame(response.data)
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'])
@@ -28,181 +29,140 @@ def load_data():
         st.error(f"Error mengambil data dari Supabase: {e}")
         return pd.DataFrame()
 
-# Fungsi untuk mengambil histori lengkap saham yang dipilih
-@st.cache_data(ttl=3600)
-def load_ticker_history(ticker: str):
-    try:
-        response = (
-            supabase.table("ihsg_daily")
-            .select("*")
-            .eq("ticker", ticker)
-            .order("date", desc=False)
-            .execute()
-        )
-        df = pd.DataFrame(response.data)
-        if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
-        return df
-    except Exception as e:
-        st.error(f"Error mengambil data histori {ticker}: {e}")
-        return pd.DataFrame()
-
 df = load_data()
+
+def calculate_ma_signals(dataframe):
+    """Add SMA/EMA values and crossover flags to an OHLC dataframe."""
+    result = dataframe.sort_values("date").copy()
+    close = pd.to_numeric(result["close"], errors="coerce")
+    result["sma9"] = close.rolling(window=9, min_periods=9).mean()
+    result["sma20"] = close.rolling(window=20, min_periods=20).mean()
+    result["ema9"] = close.ewm(span=9, adjust=False, min_periods=1).mean()
+    result["ema20"] = close.ewm(span=20, adjust=False, min_periods=1).mean()
+
+    for prefix in ("ema", "sma"):
+        difference = result[f"{prefix}9"] - result[f"{prefix}20"]
+        result[f"golden_cross_{prefix}"] = (difference > 0) & (difference.shift(1) <= 0)
+        result[f"death_cross_{prefix}"] = (difference < 0) & (difference.shift(1) >= 0)
+    return result
+
+
+def scan_market_signals(dataframe, days=35):
+    """Find crossover events in the latest trading window for every ticker."""
+    signals = []
+    for ticker, ticker_data in dataframe.groupby("ticker"):
+        calculated = calculate_ma_signals(ticker_data)
+        recent = calculated.tail(days)
+        signal_columns = {
+            "golden_cross_ema": "🟢 Golden Cross EMA 9x20",
+            "death_cross_ema": "🔴 Death Cross EMA 9x20",
+            "golden_cross_sma": "🟢 Golden Cross MA 9x20",
+            "death_cross_sma": "🔴 Death Cross MA 9x20",
+        }
+        for column, label in signal_columns.items():
+            matches = recent[recent[column]]
+            for _, row in matches.iterrows():
+                signals.append({
+                    "Ticker": ticker,
+                    "Harga Terakhir": row["close"],
+                    "Jenis Sinyal": label,
+                    "Tanggal Sinyal": row["date"].strftime("%Y-%m-%d"),
+                    "Volume": row["volume"],
+                })
+    return pd.DataFrame(signals)
+
+
+def signal_status(calculated, prefix):
+    latest = calculated.iloc[-1]
+    if latest[f"golden_cross_{prefix}"]:
+        return "Baru saja Golden Cross"
+    if latest[f"death_cross_{prefix}"]:
+        return "Baru saja Death Cross"
+    return "Bullish" if latest[f"{prefix}9"] > latest[f"{prefix}20"] else "Bearish"
+
+
+def build_price_chart(calculated, show_ema, show_sma):
+    figure = go.Figure()
+    figure.add_trace(go.Candlestick(
+        x=calculated["date"], open=calculated["open"], high=calculated["high"],
+        low=calculated["low"], close=calculated["close"], name="Harga",
+    ))
+    line_styles = {
+        "ema9": ("EMA 9", "#d89b27", "solid"),
+        "ema20": ("EMA 20", "#65b7d6", "solid"),
+        "sma9": ("SMA 9", "#d89b27", "dash"),
+        "sma20": ("SMA 20", "#65b7d6", "dash"),
+    }
+    for name, (label, color, dash) in line_styles.items():
+        if (name.startswith("ema") and show_ema) or (name.startswith("sma") and show_sma):
+            figure.add_trace(go.Scatter(
+                x=calculated["date"], y=calculated[name], name=label,
+                mode="lines", line={"color": color, "dash": dash},
+            ))
+    for prefix, label, color, symbol in [
+        ("ema", "EMA", "#16a34a", "triangle-up"),
+        ("ema", "EMA", "#dc2626", "triangle-down"),
+        ("sma", "MA", "#16a34a", "triangle-up"),
+        ("sma", "MA", "#dc2626", "triangle-down"),
+    ]:
+        event = "golden_cross" if symbol == "triangle-up" else "death_cross"
+        points = calculated[calculated[f"{event}_{prefix}"]]
+        if not points.empty:
+            figure.add_trace(go.Scatter(
+                x=points["date"], y=points["low"], mode="markers",
+                name=f"{label} {'Golden' if event == 'golden_cross' else 'Death'} Cross",
+                marker={"color": color, "symbol": symbol, "size": 12},
+            ))
+    figure.update_layout(height=600, xaxis_rangeslider_visible=False, hovermode="x unified")
+    return figure
+
+
+def select_screener_ticker(ticker):
+    st.session_state["selected_ticker"] = ticker
+
 
 # Tampilan Utama Dashboard
 if not df.empty:
-    st.subheader("Daftar Semua Saham")
-    latest_by_ticker = (
-        df.sort_values(["ticker", "date"], ascending=[True, False])
-        .drop_duplicates(subset="ticker")
-        .sort_values("ticker")
-    )
-    page_size = st.selectbox("Jumlah saham per halaman", [25, 50, 100], index=0)
-    page_count = max(1, (len(latest_by_ticker) + page_size - 1) // page_size)
-    page_number = st.number_input(
-        "Halaman",
-        min_value=1,
-        max_value=page_count,
-        value=1,
-        step=1,
-    )
-    start = (page_number - 1) * page_size
-    page_df = latest_by_ticker.iloc[start:start + page_size]
-    st.caption(f"Menampilkan {start + 1}-{start + len(page_df)} dari {len(latest_by_ticker)} saham")
-    st.dataframe(
-        page_df[["ticker", "date", "open", "high", "low", "close", "volume"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+    df["date"] = pd.to_datetime(df["date"])
+    tickers = sorted(df["ticker"].dropna().unique())
+    if "selected_ticker" not in st.session_state:
+        st.session_state["selected_ticker"] = tickers[0]
 
-    st.markdown("---")
-    # Dropdown Filter Ticker
-    tickers = latest_by_ticker['ticker'].unique()
-    selected_ticker = st.selectbox("Pilih Saham / Indeks:", tickers)
-    
-    # Filter Data berdasarkan Ticker yang dipilih dari Supabase secara lengkap
-    filtered_df = load_ticker_history(selected_ticker)
-    
-    if not filtered_df.empty:
-        # Menampilkan Metric/Ringkasan Singkat
-        latest_row = filtered_df.iloc[-1]
+    analysis_tab, screener_tab = st.tabs(["📈 Analisis Saham & Chart", "🎯 Sinyal Screener (Golden & Death Cross)"])
+    with analysis_tab:
+        selected_ticker = st.selectbox("Pilih Saham / Indeks", tickers, key="selected_ticker")
+        filtered_df = df[df["ticker"] == selected_ticker].sort_values("date")
+        calculated = calculate_ma_signals(filtered_df)
+        latest_row = calculated.iloc[-1]
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Tanggal Terakhir", latest_row['date'].strftime('%Y-%m-%d'))
-        col1_delta = None
-        col2.metric("Open", f"{latest_row['open']:,}")
-        col3.metric("Close", f"{latest_row['close']:,}")
-        col4.metric("Volume", f"{latest_row['volume']:,}")
-        
-        st.markdown("---")
-        
-        # Pengaturan Tampilan Chart
-        st.subheader(f"📊 Pergerakan Harga - {selected_ticker}")
-        
-        chart_col1, chart_col2 = st.columns([1, 1])
-        with chart_col1:
-            chart_type = st.radio("Tipe Chart:", ["Candlestick", "Line Chart (Close)"], horizontal=True)
-        with chart_col2:
-            time_range = st.radio("Rentang Waktu:", ["1 Bulan", "3 Bulan", "6 Bulan", "1 Tahun", "Semua"], horizontal=True, index=4)
-
-        chart_df = filtered_df.copy()
-        if time_range == "1 Bulan":
-            chart_df = chart_df[chart_df["date"] >= (chart_df["date"].max() - pd.Timedelta(days=30))]
-        elif time_range == "3 Bulan":
-            chart_df = chart_df[chart_df["date"] >= (chart_df["date"].max() - pd.Timedelta(days=90))]
-        elif time_range == "6 Bulan":
-            chart_df = chart_df[chart_df["date"] >= (chart_df["date"].max() - pd.Timedelta(days=180))]
-        elif time_range == "1 Tahun":
-            chart_df = chart_df[chart_df["date"] >= (chart_df["date"].max() - pd.Timedelta(days=365))]
-
-        # Render Chart Interaktif
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-
-            # Subplot: Baris 1 Harga (Candle/Line), Baris 2 Volume
-            fig = make_subplots(
-                rows=2, cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.08,
-                row_heights=[0.75, 0.25],
-                subplot_titles=(f"Harga {selected_ticker}", "Volume")
-            )
-
-            if chart_type == "Candlestick":
-                fig.add_trace(
-                    go.Candlestick(
-                        x=chart_df['date'],
-                        open=chart_df['open'],
-                        high=chart_df['high'],
-                        low=chart_df['low'],
-                        close=chart_df['close'],
-                        name="OHLC",
-                        increasing_line_color="#26a69a",
-                        decreasing_line_color="#ef5350"
-                    ),
-                    row=1, col=1
-                )
-            else:
-                fig.add_trace(
-                    go.Scatter(
-                        x=chart_df['date'],
-                        y=chart_df['close'],
-                        mode='lines',
-                        name="Close Price",
-                        line=dict(color='#2962FF', width=2)
-                    ),
-                    row=1, col=1
-                )
-
-            # Bar chart volume dengan warna selaras pergerakan hari itu
-            colors = [
-                "#26a69a" if c >= o else "#ef5350"
-                for c, o in zip(chart_df['close'], chart_df['open'])
-            ]
-            fig.add_trace(
-                go.Bar(
-                    x=chart_df['date'],
-                    y=chart_df['volume'],
-                    name="Volume",
-                    marker_color=colors,
-                    opacity=0.8
-                ),
-                row=2, col=1
-            )
-
-            # Cari hari-hari libur bursa yang tidak ada data perdagangannya di chart_df
-            all_days = pd.date_range(start=chart_df['date'].min(), end=chart_df['date'].max(), freq='D')
-            trading_days = set(chart_df['date'].dt.strftime('%Y-%m-%d'))
-            holidays = [d.strftime('%Y-%m-%d') for d in all_days if d.strftime('%Y-%m-%d') not in trading_days and d.weekday() < 5]
-
-            fig.update_layout(
-                xaxis_rangeslider_visible=False,
-                height=550,
-                margin=dict(l=20, r=20, t=40, b=20),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                template="plotly_white"
-            )
-
-            # Sembunyikan akhir pekan (Sabtu & Minggu) dan hari libur non-trading
-            rangebreak_rules = [dict(bounds=["sat", "mon"])] # hide weekend
-            if holidays:
-                rangebreak_rules.append(dict(values=holidays)) # hide public holidays
-
-            fig.update_xaxes(rangebreaks=rangebreak_rules)
-            st.plotly_chart(fig, use_container_width=True)
-        except ImportError:
-            # Fallback jika plotly belum terinstall
-            if chart_type == "Candlestick":
-                st.line_chart(chart_df.set_index("date")[["open", "high", "low", "close"]])
-            else:
-                st.line_chart(chart_df.set_index("date")["close"])
-            st.bar_chart(chart_df.set_index("date")["volume"])
-        
-        # Tabel Data OHLC
+        col1.metric("Tanggal Terakhir", latest_row["date"].strftime("%Y-%m-%d"))
+        col2.metric("Open", f"{latest_row['open']:,.0f}")
+        col3.metric("Close", f"{latest_row['close']:,.0f}")
+        col4.metric("Volume", f"{latest_row['volume']:,.0f}")
+        status1, status2 = st.columns(2)
+        status1.metric("Status EMA 9x20", signal_status(calculated, "ema"))
+        status2.metric("Status MA 9x20", signal_status(calculated, "sma"))
+        show_ema = st.checkbox("Tampilkan EMA 9 & EMA 20", value=True)
+        show_sma = st.checkbox("Tampilkan SMA 9 & SMA 20", value=False)
+        st.plotly_chart(build_price_chart(calculated, show_ema, show_sma), use_container_width=True)
         st.subheader("Data Histori OHLC")
-        st.dataframe(
-            filtered_df[['date', 'open', 'high', 'low', 'close', 'volume']].sort_values("date", ascending=False),
-            use_container_width=True
-        )
+        st.dataframe(calculated[["date", "open", "high", "low", "close", "volume"]].sort_values("date", ascending=False), use_container_width=True, hide_index=True)
+
+    with screener_tab:
+        market_signals = scan_market_signals(df)
+        signal_options = ["Semua Sinyal", "🟢 Golden Cross EMA 9x20", "🔴 Death Cross EMA 9x20", "🟢 Golden Cross MA 9x20", "🔴 Death Cross MA 9x20"]
+        selected_signal = st.selectbox("Filter Sinyal", signal_options)
+        if selected_signal != "Semua Sinyal" and not market_signals.empty:
+            market_signals = market_signals[market_signals["Jenis Sinyal"] == selected_signal]
+        if market_signals.empty:
+            st.info("Tidak ada sinyal crossover dalam 35 hari perdagangan terakhir.")
+        else:
+            st.dataframe(market_signals.sort_values("Tanggal Sinyal", ascending=False), use_container_width=True, hide_index=True)
+            screener_ticker = st.selectbox("Pilih ticker untuk chart", sorted(market_signals["Ticker"].unique()))
+            st.button(
+                "Buka di tab analisis",
+                on_click=select_screener_ticker,
+                args=(screener_ticker,),
+            )
 else:
     st.info("Belum ada data di database Supabase atau tabel 'ihsg_daily' masih kosong. Jalankan GitHub Actions untuk mengisi data pertama kali.")
