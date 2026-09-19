@@ -1,0 +1,19 @@
+name: Historical Backfill Scraper
+
+on:
+  workflow_dispatch: # Pemicu manual 1-klik tanpa input
+
+jobs:
+  run-backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Batas maksimal aman GitHub Actions (6 jam)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
+        run: python fetch_history.py
