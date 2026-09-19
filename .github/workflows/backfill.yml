@@ -1,7 +1,9 @@
 name: Historical Backfill Scraper
 
 on:
-  workflow_dispatch: # Pemicu manual 1-klik tanpa input
+  schedule:
+    - cron: '0 * * * *' # Berjalan otomatis tiap 1 jam sekali
+  workflow_dispatch: # Tetap aktif untuk memicu manual kapan saja
 
 jobs:
   run-backfill:
