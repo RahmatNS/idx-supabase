@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
@@ -43,7 +43,7 @@ def get_tickers():
     return ["^JKSE", *(f"{code}.JK" for code in sorted(codes))]
 
 
-def get_earliest_date_in_db() -> datetime.date | None:
+def get_earliest_date_in_db() -> date | None:
     try:
         res = (
             supabase.table("ihsg_daily")
